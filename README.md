@@ -18,6 +18,12 @@ An open-source web application for AI model security assessments, built with Rub
 ## Quick Start
 
 ```bash
+curl -sL https://raw.githubusercontent.com/0din-ai/ai-scanner/main/scripts/install.sh | bash
+```
+
+Or manually:
+
+```bash
 curl -O https://raw.githubusercontent.com/0din-ai/ai-scanner/main/dist/docker-compose.yml
 curl -O https://raw.githubusercontent.com/0din-ai/ai-scanner/main/.env.example
 cp .env.example .env
