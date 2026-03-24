@@ -25,6 +25,11 @@ cd "$INSTALL_DIR"
 
 echo "📁 Installing to $(pwd)"
 
+# Pre-create storage directory owned by the current user.
+# The container entrypoint will fix ownership if needed, but this avoids
+# Docker creating it as root:root on first compose-up.
+mkdir -p storage
+
 # Download compose file
 echo "⬇️  Downloading docker-compose.yml..."
 curl -sfL "https://raw.githubusercontent.com/0din-ai/ai-scanner/main/dist/docker-compose.yml" -o docker-compose.yml

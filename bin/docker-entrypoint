@@ -6,6 +6,32 @@ if [ -z "${LD_PRELOAD+x}" ]; then
     export LD_PRELOAD
 fi
 
+# If running as root, fix storage permissions and re-exec as rails user.
+# This handles bind-mounted ./storage directories that may be owned by root on the host.
+# Pattern used by official PostgreSQL, Redis, and MySQL Docker images.
+if [ "$(id -u)" = '0' ]; then
+    STORAGE_DIRS="
+        /rails/storage/logs/rails
+        /rails/storage/logs/scans
+        /rails/storage/config
+        /rails/storage/attached_files
+        /rails/storage/pdfs
+        /rails/storage/screenshots
+    "
+
+    # shellcheck disable=SC2086
+    mkdir -p $STORAGE_DIRS \
+      || { echo "ERROR: Failed to create storage directories. Check volume mount permissions." >&2; exit 1; }
+
+    chown -R --no-dereference rails:rails /rails/storage \
+      || { echo "ERROR: Failed to chown /rails/storage. Filesystem may not support ownership changes." >&2; exit 1; }
+
+    # Re-exec this script as the rails user
+    exec gosu rails "$0" "$@"
+fi
+
+# --- Running as rails user from here ---
+
 # Extract community probe metadata from garak (generates config/probes/community_probes.json)
 if python3 --version > /dev/null 2>&1; then
   python3 /rails/script/extract_community_probes.py || echo "⚠️  Community probe extraction skipped (garak may not be installed)"

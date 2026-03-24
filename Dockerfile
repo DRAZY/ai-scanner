@@ -17,7 +17,7 @@ WORKDIR /rails
 # Install base packages including nodejs for runtime Playwright execution
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y \
-    curl wget python3 python3-venv libyaml-dev libjemalloc2 \
+    curl wget python3 python3-venv libyaml-dev libjemalloc2 gosu \
     libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 libxcomposite1 \
     libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 xdg-utils fonts-liberation libasound2t64 \
     openssl ca-certificates \
@@ -196,9 +196,13 @@ RUN groupadd --system --gid 1000 rails && \
     chmod -R 755 /opt/playwright-browsers
 
 # Cache the HTTP Request: GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-# Run as rails user to ensure proper permissions
-USER rails
-RUN HOME=/tmp /opt/venv/bin/garak --list_probes || true
+# Run via gosu since container starts as root (no USER directive)
+RUN gosu rails sh -c 'HOME=/tmp /opt/venv/bin/garak --list_probes' \
+    || echo "WARNING: garak probe cache pre-warming failed (non-fatal, will retry at runtime)"
+
+# Note: No USER directive — container starts as root so the entrypoint can
+# fix bind-mount ownership before dropping to rails via gosu.
+# See bin/docker-entrypoint for the privilege-drop logic.
 
 # Entrypoint prepares the database.
 ENTRYPOINT ["/rails/bin/docker-entrypoint"]
