@@ -11,6 +11,8 @@
 ARG RUBY_VERSION=4.0.1
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
+LABEL org.opencontainers.image.source="https://github.com/0din-ai/ai-scanner"
+
 # Rails app lives here
 WORKDIR /rails
 
