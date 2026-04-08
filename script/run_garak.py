@@ -8,7 +8,7 @@ via PostgreSQL database operations for multi-pod deployment support.
 Communication Flow:
     1. notify_report_running: UPDATE reports SET status=1, pid=X
     2. notify_report_ready: INSERT into raw_report_data, enqueue ProcessReportJob
-    3. notify_report_stopped: UPDATE reports SET pid=NULL
+    3. notify_report_stopped: UPDATE reports SET pid=NULL WHERE pid matches caller (PID-match guard)
 
 Environment Variables:
     DATABASE_URL: PostgreSQL connection string (required)
@@ -53,8 +53,30 @@ current_report_uuid = None
 current_heartbeat = None
 current_journal_sync = None
 
+# Capture the main process PID at module load time so forked children can
+# detect they are NOT the owner and skip parent-only cleanup.
+_main_pid = os.getpid()
+
 def signal_handler(signum, frame):
-    """Handle termination signals to ensure cleanup."""
+    """Handle termination signals to ensure cleanup.
+
+    Only the original main process performs report cleanup. Forked children
+    (e.g. garak internals) inherit this handler via fork(), but must not
+    execute parent-only cleanup (notify_report_stopped, heartbeat/journal
+    stop) because that corrupts the parent's lifecycle state.
+    """
+    my_pid = os.getpid()
+    if my_pid != _main_pid:
+        # Child process — hard exit without unwinding into parent cleanup frames
+        logger.warning(
+            f"Signal {signum} in child process (pid={my_pid}, parent={_main_pid}). "
+            f"Skipping parent cleanup, exiting immediately."
+        )
+        os._exit(1)
+
+    logger.info(
+        f"Signal {signum} in main process (pid={my_pid}). Running cleanup..."
+    )
     print(f"\nReceived signal {signum}, cleaning up...", file=sys.stderr)
     if current_journal_sync:
         current_journal_sync.stop()  # Final sync before exit
@@ -132,13 +154,13 @@ def notify_report_ready_from_synced(report_uuid):
 
 
 def notify_report_stopped(report_uuid):
-    """Clear PID from report in database."""
+    """Clear PID from report in database (only if stored PID matches caller)."""
     try:
         result = db_notify_stopped(report_uuid)
         if result:
             print(f"Report {report_uuid} PID cleared")
         else:
-            print(f"Warning: Failed to clear PID for report {report_uuid}", file=sys.stderr)
+            print(f"Report {report_uuid} PID not cleared (stored PID does not match this process)", file=sys.stderr)
         return result
     except Exception as e:
         print(f"Error notifying report stopped: {e}", file=sys.stderr)

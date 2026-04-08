@@ -26,6 +26,8 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
     allow(Turbo::StreamsChannel).to receive(:broadcast_remove_to)
     # Don't actually run garak scans
     allow_any_instance_of(RunGarakScan).to receive(:call)
+    # Stub the Solid Queue lookup - in test env we don't have Solid Queue tables
+    allow_any_instance_of(CheckStaleReportsJob).to receive(:pending_process_job_report_ids).and_return(Set.new)
   end
 
   describe "Scenario 1: Pod crash during scan execution" do
@@ -35,6 +37,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
         target: target,
         scan: scan,
         status: :running,
+        pid: 12345,
         heartbeat_at: 5.minutes.ago, # Stale heartbeat
         retry_count: 0,
         logs: "[2025-01-01 10:00:00] Scan started\n[2025-01-01 10:01:00] Processing probes..."
@@ -68,6 +71,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
       expect(report.retry_count).to eq(1)
       expect(report.last_retry_at).to be_within(5.seconds).of(Time.current)
       expect(report.heartbeat_at).to be_nil # Reset for fresh start
+      expect(report.pid).to be_nil # Stale PID cleared
       expect(report.logs).to include("Auto-retry 1:")
       expect(report.logs).to include("Requeued after interruption")
 
@@ -132,6 +136,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
         target: target,
         scan: scan,
         status: :running,
+        pid: 12345,
         heartbeat_at: 5.minutes.ago,
         retry_count: CheckStaleReportsJob::MAX_INTERRUPT_RETRIES, # 3
         logs: "Previous retry attempts..."
@@ -260,6 +265,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
           target: target,
           scan: scan,
           status: :running,
+          pid: 12345 + i,
           heartbeat_at: (5 + i).minutes.ago,
           retry_count: 0
         )
@@ -292,6 +298,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
         target: target,
         scan: scan,
         status: :running,
+        pid: 12345,
         heartbeat_at: 5.minutes.ago,
         retry_count: 0,
         logs: "[2025-01-01 10:00:00] Original scan log"
@@ -310,7 +317,7 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
       expect(report.logs).to include("Auto-retry 1:")
 
       # Simulate second run and interruption
-      report.update!(status: :running, heartbeat_at: 5.minutes.ago)
+      report.update!(status: :running, pid: 12346, heartbeat_at: 5.minutes.ago)
       CheckStaleReportsJob.new.perform
       report.reload
 
@@ -318,6 +325,84 @@ RSpec.describe "Interrupted Reports E2E", type: :feature do
       expect(report.logs).to include("[2025-01-01 10:00:00] Original scan log")
       expect(report.logs).to include("Auto-retry 1:")
       expect(report.logs.scan(/Interrupted:/).count).to eq(2) # Two interruptions logged
+    end
+  end
+
+  describe "Scenario 11: Orphaned running process (PID cleared without status update)" do
+    it "recovers a scan whose PID was cleared but status remained running" do
+      # Simulate: The parent process called notify_report_stopped (PID matched, so
+      # PID was cleared), but the process was killed before a terminal status was
+      # set. The report is left running with no owning process.
+      report = create(:report,
+        target: target,
+        scan: scan,
+        status: :running,
+        pid: nil,
+        heartbeat_at: 1.minute.ago,
+        updated_at: 3.minutes.ago,
+        retry_count: 0,
+        logs: "[2025-01-01 10:00:00] Scan started\n[2025-01-01 10:01:00] Heartbeat sent"
+      )
+
+      initial_logs = report.logs
+
+      # Step 1: CheckStaleReportsJob detects the orphaned report
+      expect {
+        CheckStaleReportsJob.new.perform
+      }.to change { report.reload.status }.from("running").to("interrupted")
+
+      # Verify orphan-specific interruption message
+      expect(report.logs).to include(initial_logs)
+      expect(report.logs).to include("Interrupted:")
+      expect(report.logs).to include("orphaned")
+      expect(report.logs).to include("pid cleared but status not updated")
+
+      # Step 2: Stabilization delay prevents immediate retry
+      RetryInterruptedReportsJob.new.perform
+      expect(report.reload.status).to eq("interrupted")
+
+      # Step 3: After stabilization delay, retry moves to pending
+      report.update_column(:updated_at, 35.seconds.ago)
+
+      expect {
+        RetryInterruptedReportsJob.new.perform
+      }.to change { report.reload.status }.from("interrupted").to("pending")
+
+      expect(report.retry_count).to eq(1)
+      expect(report.heartbeat_at).to be_nil
+      expect(report.pid).to be_nil
+      expect(report.logs).to include("Auto-retry 1:")
+      expect(report.logs).to include("Requeued after interruption")
+
+      # Step 4: StartPendingScansJob picks it up
+      report.update_column(:last_retry_at, 3.minutes.ago)
+      allow(SettingsService).to receive(:parallel_scans_limit).and_return(5)
+
+      expect {
+        StartPendingScansJob.new.perform
+      }.to change { report.reload.status }.from("pending").to("starting")
+    end
+  end
+
+  describe "Scenario 12: Orphaned running with exhausted retries" do
+    it "fails permanently when orphaned and retries exhausted" do
+      report = create(:report,
+        target: target,
+        scan: scan,
+        status: :running,
+        pid: nil,
+        heartbeat_at: 1.minute.ago,
+        updated_at: 3.minutes.ago,
+        retry_count: CheckStaleReportsJob::MAX_INTERRUPT_RETRIES,
+        logs: "Multiple retry attempts exhausted..."
+      )
+
+      expect {
+        CheckStaleReportsJob.new.perform
+      }.to change { report.reload.status }.from("running").to("failed")
+
+      expect(report.logs).to include("orphaned")
+      expect(report.logs).to include("after #{CheckStaleReportsJob::MAX_INTERRUPT_RETRIES} retry attempts")
     end
   end
 

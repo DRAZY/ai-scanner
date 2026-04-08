@@ -1,10 +1,12 @@
 # Detects crashed/stuck scans via heartbeat timeout detection.
 # Replaces PID-based health checking for multi-pod deployment support.
 #
-# This job checks three conditions:
+# This job checks four conditions:
 # 1. Running reports with stale heartbeat_at (process crashed/hung)
 # 2. Running reports that never sent a heartbeat (process never started)
 # 3. Reports stuck in 'starting' status (process failed to launch)
+# 4. Orphaned running reports with pid cleared but heartbeat present
+#    (process died after PID-match guard cleared pid without status update)
 #
 # Interrupted scans (e.g., pod teardown) are marked as 'interrupted' and
 # automatically retried by RetryInterruptedReportsJob. Only after exceeding
@@ -34,20 +36,23 @@ class CheckStaleReportsJob < ApplicationJob
   def perform
     check_stale_running_reports
     check_never_started_running_reports
+    check_orphaned_running_reports
     check_stuck_starting_reports
   end
 
   private
 
   # Detect running reports with stale heartbeat (process crashed/hung).
-  # Only checks reports that have actually sent at least one heartbeat.
-  # Reports with nil heartbeat are handled by check_never_started_running_reports.
+  # Only checks reports that have actually sent at least one heartbeat and
+  # still have a PID set (active process owner). Reports with nil PID are
+  # handled by check_orphaned_running_reports instead.
   #
   # Marks as 'interrupted' for automatic retry if under MAX_INTERRUPT_RETRIES,
   # otherwise marks as permanently 'failed'.
   def check_stale_running_reports
     stale_reports = Report.running
                           .where.not(heartbeat_at: nil)
+                          .where.not(pid: nil)
                           .where("heartbeat_at < ?", HEARTBEAT_TIMEOUT.ago)
 
     stale_reports.find_each do |report|
@@ -56,6 +61,10 @@ class CheckStaleReportsJob < ApplicationJob
 
       # Skip if no longer running (status changed while we were processing)
       next unless report.running?
+      # Skip if PID was cleared (now handled by check_orphaned_running_reports)
+      next if report.pid.nil?
+      # Skip if heartbeat arrived since the query ran
+      next if report.heartbeat_at.nil? || report.heartbeat_at > HEARTBEAT_TIMEOUT.ago
 
       heartbeat_age = (Time.current - report.heartbeat_at).round
       reason = "Scan stopped responding (no heartbeat for #{HEARTBEAT_TIMEOUT.inspect})"
@@ -108,6 +117,73 @@ class CheckStaleReportsJob < ApplicationJob
         Rails.logger.error(
           "[CheckStaleReports] Report #{report.id} (#{report.uuid}) is running " \
           "but never sent heartbeat (age: #{age}s) - " \
+          "exceeded #{MAX_INTERRUPT_RETRIES} retries, marking as failed"
+        )
+        mark_report_failed(report, "#{reason} (after #{MAX_INTERRUPT_RETRIES} retry attempts)")
+      end
+    end
+  end
+
+  # Detect orphaned running reports where the PID was cleared but the report
+  # was never transitioned out of 'running'. This can happen when the parent
+  # process receives SIGTERM — notify_report_stopped clears the PID (since it
+  # matches), but the process exits before a terminal status is set.
+  #
+  # Defence-in-depth: the signal handler fix (os._exit in children) and PID-match
+  # guard prevent most orphan scenarios, but OOM kills or unexpected crashes
+  # between PID-clear and status-update can still leave this state.
+  #
+  # Note: raw_report_data may exist for orphaned reports because JournalSyncThread
+  # writes incrementally during the scan. Its presence does NOT mean the scan
+  # completed — it may contain partial data. OrphanRawReportDataJob handles
+  # recovery of raw_report_data after the report reaches a terminal state.
+  #
+  # Additionally, a report in this state may be a completed scan awaiting async
+  # processing — the scan finished, ProcessReportJob was enqueued, PID was cleared,
+  # but ProcessReportJob hasn't run yet. To avoid interrupting these reports, we
+  # skip any that have a pending ProcessReportJob in Solid Queue.
+  #
+  # Conditions: running + pid=nil + heartbeat present + updated_at stale.
+  # The heartbeat distinguishes from never-started (handled separately).
+  # The updated_at check provides a safety window against race conditions.
+  def check_orphaned_running_reports
+    orphaned_reports = Report.running
+                             .where(pid: nil)
+                             .where.not(heartbeat_at: nil)
+                             .where("updated_at < ?", HEARTBEAT_TIMEOUT.ago)
+
+    orphaned_reports.find_each do |report|
+      report.reload
+
+      next unless report.running?
+      next unless report.pid.nil?
+      next if report.heartbeat_at.nil?
+      # Re-check updated_at safety window after reload
+      next if report.updated_at > HEARTBEAT_TIMEOUT.ago
+
+      # Skip reports with a pending ProcessReportJob — these are completed scans
+      # awaiting async processing, not true orphans. This prevents interrupting
+      # reports during normal queue backlog between scan completion and processing.
+      if pending_process_job_report_ids.include?(report.id)
+        Rails.logger.info(
+          "[CheckStaleReports] Report #{report.id} (#{report.uuid}) has pending ProcessReportJob - " \
+          "skipping orphan detection (scan completed, awaiting processing)"
+        )
+        next
+      end
+
+      reason = "Scan process orphaned (running with no owning process — pid cleared but status not updated)"
+
+      if report.retry_count < MAX_INTERRUPT_RETRIES
+        Rails.logger.warn(
+          "[CheckStaleReports] Report #{report.id} (#{report.uuid}) is orphaned " \
+          "(running, pid=nil, heartbeat present) - marking as interrupted"
+        )
+        mark_report_interrupted(report, reason)
+      else
+        Rails.logger.error(
+          "[CheckStaleReports] Report #{report.id} (#{report.uuid}) is orphaned " \
+          "(running, pid=nil, heartbeat present) - " \
           "exceeded #{MAX_INTERRUPT_RETRIES} retries, marking as failed"
         )
         mark_report_failed(report, "#{reason} (after #{MAX_INTERRUPT_RETRIES} retry attempts)")
@@ -188,6 +264,27 @@ class CheckStaleReportsJob < ApplicationJob
       "#{existing_logs}\n#{new_entry}"
     else
       new_entry
+    end
+  end
+
+  # Report IDs that have a pending ProcessReportJob in Solid Queue.
+  # Used to distinguish completed scans awaiting processing from true orphans.
+  # Memoized per perform cycle to avoid repeated queries.
+  def pending_process_job_report_ids
+    @pending_process_job_report_ids ||= begin
+      pending_jobs = SolidQueue::Job
+        .where(class_name: "ProcessReportJob")
+        .where(finished_at: nil)
+        .pluck(:arguments)
+
+      report_ids = pending_jobs.filter_map do |args_json|
+        args = args_json.is_a?(String) ? JSON.parse(args_json) : args_json
+        args.dig("arguments", 0)&.to_i
+      rescue JSON::ParserError
+        nil
+      end
+
+      Set.new(report_ids)
     end
   end
 end

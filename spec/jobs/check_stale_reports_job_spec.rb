@@ -10,13 +10,16 @@ RSpec.describe CheckStaleReportsJob, type: :job do
     allow_any_instance_of(ToastNotifier).to receive(:call)
     # Mock Turbo broadcast to avoid rendering partial in tests
     allow(Turbo::StreamsChannel).to receive(:broadcast_replace_to)
+    # Stub the Solid Queue lookup - in test env we don't have Solid Queue tables
+    # Default: return empty set (no pending jobs found)
+    allow_any_instance_of(described_class).to receive(:pending_process_job_report_ids).and_return(Set.new)
   end
 
   describe "#perform" do
     describe "stale running reports" do
       it "marks report as interrupted when heartbeat is stale (first occurrence)" do
         stale_time = 3.minutes.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 0)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, retry_count: 0)
 
         described_class.new.perform
 
@@ -28,7 +31,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "marks report as failed after max interrupt retries" do
         stale_time = 3.minutes.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 3)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, retry_count: 3)
 
         described_class.new.perform
 
@@ -39,7 +42,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "does not affect reports with recent heartbeat" do
         recent_time = 30.seconds.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: recent_time)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: recent_time)
 
         described_class.new.perform
 
@@ -72,7 +75,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "appends interruption reason to existing logs" do
         stale_time = 3.minutes.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, logs: "Previous log entry", retry_count: 0)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, logs: "Previous log entry", retry_count: 0)
 
         described_class.new.perform
 
@@ -85,7 +88,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "handles empty logs gracefully" do
         stale_time = 3.minutes.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, logs: nil, retry_count: 0)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, logs: nil, retry_count: 0)
 
         described_class.new.perform
 
@@ -97,7 +100,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "skips report if status changed during processing" do
         stale_time = 3.minutes.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time)
 
         # Simulate status change after query but before update
         allow_any_instance_of(Report).to receive(:reload) do |r|
@@ -107,9 +110,8 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
         described_class.new.perform
 
-        # Should not have been marked failed since it was completed when we checked
-        report.reload
-        # Note: actual behavior depends on the mock - this tests the guard clause
+        # Guard clause should prevent the job from modifying the DB record
+        expect(Report.find(report.id).status).to eq("running")
       end
     end
 
@@ -150,7 +152,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
       it "does not affect reports that have a heartbeat" do
         old_time = 3.minutes.ago
         recent_heartbeat = 30.seconds.ago
-        report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: recent_heartbeat, updated_at: old_time)
+        report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: recent_heartbeat, updated_at: old_time)
 
         described_class.new.perform
 
@@ -183,8 +185,102 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
         described_class.new.send(:check_never_started_running_reports)
 
-        # Should not have been marked failed since heartbeat arrived
-        # Note: actual behavior depends on the mock
+        # Guard clause should prevent the job from modifying the DB record
+        expect(Report.find(report.id).status).to eq("running")
+      end
+    end
+
+    describe "orphaned running reports (pid cleared, heartbeat present)" do
+      it "marks report as interrupted when running with nil pid and heartbeat present (first occurrence)" do
+        report = create(:report, target: target, scan: scan, status: :running,
+                        pid: nil, heartbeat_at: 1.minute.ago, updated_at: 3.minutes.ago, retry_count: 0)
+
+        described_class.new.perform
+
+        report.reload
+        expect(report.status).to eq("interrupted")
+        expect(report.logs).to include("Interrupted:")
+        expect(report.logs).to include("orphaned")
+      end
+
+      it "marks report as failed after max interrupt retries" do
+        report = create(:report, target: target, scan: scan, status: :running,
+                        pid: nil, heartbeat_at: 1.minute.ago, updated_at: 3.minutes.ago, retry_count: 3)
+
+        described_class.new.perform
+
+        report.reload
+        expect(report.status).to eq("failed")
+        expect(report.logs).to include("after 3 retry attempts")
+      end
+
+      it "does not affect running reports with a pid still set" do
+        report = create(:report, target: target, scan: scan, status: :running,
+                        pid: 12345, heartbeat_at: 1.minute.ago, updated_at: 3.minutes.ago)
+
+        described_class.new.send(:check_orphaned_running_reports)
+
+        report.reload
+        expect(report.status).to eq("running")
+      end
+
+      it "does not affect running reports with nil heartbeat (handled by never-started check)" do
+        report = create(:report, target: target, scan: scan, status: :running,
+                        pid: nil, heartbeat_at: nil, updated_at: 3.minutes.ago)
+
+        described_class.new.send(:check_orphaned_running_reports)
+
+        report.reload
+        expect(report.status).to eq("running")
+      end
+
+      it "does not affect recent orphaned reports within safety window" do
+        report = create(:report, target: target, scan: scan, status: :running,
+                        pid: nil, heartbeat_at: 30.seconds.ago, updated_at: 30.seconds.ago)
+
+        described_class.new.send(:check_orphaned_running_reports)
+
+        report.reload
+        expect(report.status).to eq("running")
+      end
+
+      it "does not affect non-running reports" do
+        report = create(:report, target: target, scan: scan, status: :pending,
+                        pid: nil, heartbeat_at: 3.minutes.ago, updated_at: 3.minutes.ago)
+
+        described_class.new.send(:check_orphaned_running_reports)
+
+        report.reload
+        expect(report.status).to eq("pending")
+      end
+
+      context "when raw_report_data exists (partial data from JournalSyncThread)" do
+        it "still marks as interrupted since raw_report_data may be partial" do
+          report = create(:report, target: target, scan: scan, status: :running,
+                          pid: nil, heartbeat_at: 1.minute.ago, updated_at: 3.minutes.ago, retry_count: 0)
+          create(:raw_report_data, report: report)
+
+          described_class.new.perform
+
+          report.reload
+          expect(report.status).to eq("interrupted")
+          expect(report.logs).to include("orphaned")
+        end
+      end
+
+      context "when a pending ProcessReportJob exists (completed scan awaiting processing)" do
+        it "skips the report instead of marking as orphaned" do
+          report = create(:report, target: target, scan: scan, status: :running,
+                          pid: nil, heartbeat_at: 1.minute.ago, updated_at: 3.minutes.ago, retry_count: 0)
+
+          allow_any_instance_of(described_class).to receive(:pending_process_job_report_ids)
+            .and_return(Set.new([ report.id ]))
+
+          described_class.new.perform
+
+          report.reload
+          expect(report.status).to eq("running")
+        end
       end
     end
 
@@ -237,7 +333,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "does not affect non-starting reports" do
         stuck_time = 3.minutes.ago
-        running_report = create(:report, target: target, scan: scan, status: :running, updated_at: stuck_time, heartbeat_at: Time.current)
+        running_report = create(:report, target: target, scan: scan, status: :running, pid: 12345, updated_at: stuck_time, heartbeat_at: Time.current)
         pending_report = create(:report, target: target, scan: scan, status: :pending, updated_at: stuck_time)
 
         described_class.new.perform
@@ -250,8 +346,8 @@ RSpec.describe CheckStaleReportsJob, type: :job do
     describe "multiple reports" do
       it "processes multiple stale reports as interrupted" do
         stale_time = 3.minutes.ago
-        report1 = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 0)
-        report2 = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 0)
+        report1 = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, retry_count: 0)
+        report2 = create(:report, target: target, scan: scan, status: :running, pid: 12346, heartbeat_at: stale_time, retry_count: 0)
 
         described_class.new.perform
 
@@ -261,7 +357,7 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "handles mix of stale running and stuck starting" do
         stale_time = 3.minutes.ago
-        running_report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 0)
+        running_report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, retry_count: 0)
         starting_report = create(:report, target: target, scan: scan, status: :starting, retry_count: 0, updated_at: stale_time)
 
         described_class.new.perform
@@ -272,8 +368,8 @@ RSpec.describe CheckStaleReportsJob, type: :job do
 
       it "fails reports that exceed max retries while interrupting others" do
         stale_time = 3.minutes.ago
-        fresh_report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 0)
-        maxed_report = create(:report, target: target, scan: scan, status: :running, heartbeat_at: stale_time, retry_count: 3)
+        fresh_report = create(:report, target: target, scan: scan, status: :running, pid: 12345, heartbeat_at: stale_time, retry_count: 0)
+        maxed_report = create(:report, target: target, scan: scan, status: :running, pid: 12346, heartbeat_at: stale_time, retry_count: 3)
 
         described_class.new.perform
 
