@@ -5,7 +5,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
 const config: Config = {
-  title: "Scanner",
+  title: "Scanner Docs | 0din.ai",
   tagline: "Open-source AI model security assessment platform",
   favicon: "img/favicon.ico",
 
@@ -62,7 +62,7 @@ const config: Config = {
 
   themeConfig: {
     navbar: {
-      title: "Scanner",
+      title: "Scanner Docs | 0din.ai",
       logo: {
         alt: "Scanner Logo",
         src: "img/logo.png",
