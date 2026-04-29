@@ -72,6 +72,8 @@ const config: Config = {
     // Footer content is rendered by the swizzled component at src/theme/Footer
     // which selects scanner / jailbreak-feed / generic links based on the
     // current pathname. The themeConfig footer field is intentionally omitted.
+    // The GitHub navbar item is appended for scanner pages by the swizzled
+    // component at src/theme/Navbar/Content (same pathname-based logic).
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,

@@ -4,8 +4,6 @@ sidebar_position: 1
 
 # Dashboard
 
-The Dashboard is the landing page of the Jailbreak Feed. It summarizes the state of disclosed AI vulnerabilities across vendors, models, and jailbreak techniques, and provides a starting point for drilling into specific reports.
-
 ## Summary Tiles
 
 Three tiles across the top of the page give a quick read on feed coverage:

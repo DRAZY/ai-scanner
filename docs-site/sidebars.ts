@@ -69,6 +69,11 @@ const sidebars: SidebarsConfig = {
       label: "Jailbreak Feed",
       collapsed: false,
       items: [
+        {
+          type: "doc",
+          id: "jailbreak-feed/introduction",
+          label: "Introduction",
+        },
         "jailbreak-feed/dashboard",
         {
           type: "category",
