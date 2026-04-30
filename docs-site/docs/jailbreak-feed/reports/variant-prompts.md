@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # Variant Prompts Tab
 
-The **Variant Prompts** tab shows industry-tailored rewrites of the original jailbreak prompt. Variants demonstrate how the same vulnerability can be re-skinned for different real-world contexts, making it easier to assess relevance for a specific deployment.
+The **Variant Prompts** tab shows industry-tailored rewrites of the original jailbreak prompt. Variants demonstrate how the same vulnerability can be re-targetted for different real-world contexts, making it easier to assess relevance for a specific deployment.
 
 :::note Available on Team and Enterprise
 **0DIN industry variants** are included in the [Team and Enterprise plans](https://0din.ai/products). The Free plan does not include this section.
@@ -30,8 +30,4 @@ Each variant prompt is rendered as a card with three sections:
 
 ## Why Variants Matter
 
-A vulnerability that looks abstract in its original form often becomes concrete and high-impact when reframed for a specific industry. Variants help:
-
-- **Red teamers** stress-test models against domain-realistic prompts.
-- **Defenders** evaluate whether their model deployment is exposed in their own vertical.
-- **Researchers** generalize findings beyond the original disclosure context.
+Standard security testing uses Chemical, Biological, Radiological, and Nuclear (CBRN) targets to generate generic attack techniques against an LLM. Variants retarget these techniques for industry verticals. For example, instead of extracting a recipe for crystal meth, a professional in the life insurance industry would target extraction of internal documentation on actuarial tables. A vulnerability that looks abstract in its original form often becomes concrete and high-impact when reframed for a specific industry.
