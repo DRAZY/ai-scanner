@@ -56,11 +56,19 @@ const config: Config = {
         theme: {
           customCss: "./src/css/custom.css",
         },
+        gtag: {
+          trackingID: "G-GQY604KVC1",
+          anonymizeIP: true,
+        },
       } satisfies Preset.Options,
     ],
   ],
 
   themeConfig: {
+    colorMode: {
+      defaultMode: "dark",
+      respectPrefersColorScheme: true,
+    },
     navbar: {
       title: "0din.ai Docs",
       logo: {
