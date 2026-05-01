@@ -5,8 +5,8 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
 const config: Config = {
-  title: "Scanner Docs | 0din.ai",
-  tagline: "Open-source AI model security assessment platform",
+  title: "0din.ai Docs",
+  tagline: "Documentation for 0DIN's Scanner and Jailbreak Feed",
   favicon: "img/favicon.ico",
 
   url: "https://0din.ai",
@@ -62,60 +62,18 @@ const config: Config = {
 
   themeConfig: {
     navbar: {
-      title: "Scanner Docs | 0din.ai",
+      title: "0din.ai Docs",
       logo: {
-        alt: "Scanner Logo",
+        alt: "0din.ai",
         src: "img/logo.png",
       },
-      items: [
-        {
-          type: "docSidebar",
-          sidebarId: "docsSidebar",
-          position: "left",
-          label: "Docs",
-        },
-        {
-          href: "https://github.com/0din-ai/ai-scanner",
-          label: "GitHub",
-          position: "right",
-        },
-      ],
+      items: [],
     },
-    footer: {
-      style: "dark",
-      links: [
-        {
-          title: "Docs",
-          items: [
-            { label: "Getting Started", to: "/getting-started/quick-start" },
-            { label: "User Guide", to: "/user-guide/core-concepts" },
-            { label: "Deployment", to: "/deployment/docker-compose" },
-            { label: "Development", to: "/development/setup" },
-          ],
-        },
-        {
-          title: "Community",
-          items: [
-            {
-              label: "GitHub",
-              href: "https://github.com/0din-ai/ai-scanner",
-            },
-            {
-              label: "Issues",
-              href: "https://github.com/0din-ai/ai-scanner/issues",
-            },
-          ],
-        },
-        {
-          title: "More",
-          items: [
-            { label: "0din.ai", href: "https://0din.ai" },
-            { label: "NVIDIA garak", href: "https://github.com/NVIDIA/garak" },
-          ],
-        },
-      ],
-      copyright: `Copyright © ${new Date().getFullYear()} Scanner Contributors. Licensed under Apache 2.0.`,
-    },
+    // Footer content is rendered by the swizzled component at src/theme/Footer
+    // which selects scanner / jailbreak-feed / generic links based on the
+    // current pathname. The themeConfig footer field is intentionally omitted.
+    // The GitHub navbar item is appended for scanner pages by the swizzled
+    // component at src/theme/Navbar/Content (same pathname-based logic).
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
